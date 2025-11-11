@@ -137,7 +137,7 @@ def get_phone_keyboard():
     # We use ReplyKeyboardMarkup for this to ensure the special button works
     return ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
 
-# --- NEW DIRECT MESSAGE CONVERSATION HANDLERS (MODIFIED) ---
+# --- DIRECT MESSAGE CONVERSATION HANDLERS (MODIFIED) ---
 
 async def start_direct_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the conversation by asking for the phone number."""
@@ -199,33 +199,46 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def receive_direct_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Receives the message (text or photo) and forwards it to the support chat, including the phone number."""
+    """
+    Receives the message (text or photo) and forwards it to the support chat, including the phone number.
+    FIXED: Escapes backticks in user text/caption to prevent Markdown parsing errors in the header.
+    """
     user = update.effective_user
     phone_number = context.user_data.get('phone_number', 'N/A (Not Provided)')
 
+    # Safely get username/ID text without extra formatting for the header
+    user_info = f"@{user.username or 'N/A'} (ID: {user.id})"
+    
     # Compile the summary header for the support team
     summary_header = (
         "🔔 **NEW DIRECT MESSAGE** 🔔\n"
-        f"**From:** @{user.username or 'N/A'} (ID: `{user.id}`)\n"
-        f"**📞 Phone:** `{phone_number}`\n" # PHONE NUMBER INCLUDED HERE
+        f"**From:** {user_info}\n"
+        f"**📞 Phone:** `{phone_number}`\n" 
         "-------------------------------------\n"
     )
     
     # 1. Forward the message (photo/text) to the support chat
     try:
         # Ensure the phone keyboard is removed from the user's view
-        reply_markup = get_back_to_start_keyboard()
+        reply_markup_remove = ReplyKeyboardMarkup([[]], resize_keyboard=True, one_time_keyboard=True, selective=True)
 
         if update.message.text:
+            # FIX: Escape backticks in the user's text to prevent Markdown error
+            safe_message = update.message.text.replace("`", "'")
+            
             await context.bot.send_message(
                 chat_id=SUPPORT_CHAT_ID,
-                text=summary_header + update.message.text,
+                text=summary_header + safe_message,
                 parse_mode='Markdown'
             )
             confirmation_text = "✅ **መልዕክትዎ ተልኳል!** Family Academy ቡድን መልዕክትዎን ተመልክቶ በቅርቡ መልስ ይሰጥዎታል፡፡"
 
         elif update.message.photo:
-            caption = summary_header + (update.message.caption or "*No Caption Provided*")
+            caption_text = update.message.caption or "*No Caption Provided*"
+            # FIX: Escape backticks in the photo caption
+            safe_caption = caption_text.replace("`", "'")
+            caption = summary_header + safe_caption
+            
             await context.bot.send_photo(
                 chat_id=SUPPORT_CHAT_ID,
                 photo=update.message.photo[-1].file_id,
@@ -245,7 +258,7 @@ async def receive_direct_message(update: Update, context: ContextTypes.DEFAULT_T
         # 2. Confirm to the user and return to main menu, removing the reply keyboard
         await update.message.reply_text(
             confirmation_text,
-            reply_markup=ReplyKeyboardMarkup([[]], resize_keyboard=True, one_time_keyboard=True, selective=True) # Send empty reply keyboard to remove it
+            reply_markup=reply_markup_remove # Remove the reply keyboard
         )
         # 3. Send the final main menu with the inline keyboard
         await context.bot.send_message(
@@ -269,19 +282,27 @@ async def receive_direct_message(update: Update, context: ContextTypes.DEFAULT_T
 async def cancel_direct_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Cancels the message composition and returns to the start menu."""
     
+    # Remove the Reply Keyboard if present (for phone number state)
+    reply_markup_remove = ReplyKeyboardMarkup([[]], resize_keyboard=True, one_time_keyboard=True, selective=True)
+
     if update.callback_query:
         # User pressed the Inline 'Cancel Message' button
         query = update.callback_query
         await query.answer()
         await query.edit_message_text(
             text='Message composition canceled. Press /start to open the main menu.',
-            reply_markup=None # Remove the cancel button
+            reply_markup=None # Remove the inline cancel button
+        )
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Menu loaded.",
+            reply_markup=reply_markup_remove # Ensure reply keyboard is removed
         )
     else:
         # User sent /start during the conversation (CommandHandler fallback)
         await update.message.reply_text(
             'Message composition canceled. Press /start to open the main menu.',
-            reply_markup=ReplyKeyboardMarkup([[]], resize_keyboard=True, one_time_keyboard=True, selective=True) # Remove the Reply Keyboard
+            reply_markup=reply_markup_remove # Remove the Reply Keyboard
         )
     
     # Call the main start command to return to the menu
@@ -291,8 +312,6 @@ async def cancel_direct_message(update: Update, context: ContextTypes.DEFAULT_TY
     return ConversationHandler.END
 
 # --- REGISTRATION CONVERSATION HANDLERS (Unchanged in logic) ---
-# NOTE: Registration handlers are still present but only accessible if you add a 'Register' button back
-# or if you use the direct callback data in a message (e.g., /start_reg).
 
 async def start_registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the registration conversation (hidden from main menu now)."""
@@ -388,7 +407,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 "መልዕክት ለመላክ፣ ለመገናኘት ወይም ስለ Family Academy ጥያቄ ለመጠየቅ ከፈለጉ፣ "
 "እዚህ በቀጥታ መጠየቅ ትችላላችሁ፣ እኛም **ወዲያውኑ** እንመልሳለን።\n\n"
 "**እባክዎ ከታች ያለውን ምርጫ ይምረጡ።**"
-
     )
 
     # First message: Remove any lingering ReplyKeyboardMarkup
