@@ -1,6 +1,6 @@
 import os
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -27,8 +27,8 @@ SUPPORT_CHAT_ID = "8323892309"
 # Conversation States for Registration Flow (Kept for existing logic)
 NAME, CLASS, REFERENCE_CODE = range(3)
 
-# Conversation State for Direct Message Flow
-SEND_MESSAGE = 99
+# Conversation States for Direct Message Flow (MODIFIED)
+ASK_PHONE_NUMBER, SEND_MESSAGE = range(99, 101) # 99 and 100
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -121,38 +121,101 @@ def get_back_to_start_keyboard():
 
 def get_cancel_message_keyboard():
     """Keyboard to cancel direct message composition."""
+    # This is an InlineKeyboardMarkup used for cancelling the message
     return InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel Message", callback_data="GO_BACK_START")]])
 
+def get_phone_keyboard():
+    """
+    Returns a ReplyKeyboardMarkup with a 'Share Contact' button.
+    This special button allows users to share their Telegram-associated phone number easily.
+    """
+    keyboard = [
+        [
+            KeyboardButton("📱 Share My Phone Number", request_contact=True)
+        ]
+    ]
+    # We use ReplyKeyboardMarkup for this to ensure the special button works
+    return ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
 
-# --- NEW DIRECT MESSAGE CONVERSATION HANDLERS ---
+# --- NEW DIRECT MESSAGE CONVERSATION HANDLERS (MODIFIED) ---
 
 async def start_direct_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Starts the conversation to compose a direct message."""
+    """Starts the conversation by asking for the phone number."""
     query = update.callback_query
     await query.answer()
 
+    # The InlineKeyboard needs to be removed/replaced by the phone keyboard
+    # For now, we will edit the message to present the new step.
     await query.edit_message_text(
-        text="**📩 Direct Message to Family Academy Support**\n\n"
+        text="**📞 Step 1: Please share your Phone Number**\n\n"
+             "መልዕክትዎን ከመላክዎ በፊት፣ አድሚኑ መልስ ሊሰጥዎ እንዲችል የስልክ ቁጥርዎን ማስገባት ግድ ነው፡፡\n"
+             "**\"📱 Share My Phone Number\"** የሚለውን ቁልፍ በመጫን በቀላሉ ቁጥርዎን ማጋራት ይችላሉ፡፡ ወይም ደግሞ እራስዎ ማስገባት ይችላሉ፡፡",
+        parse_mode='Markdown'
+    )
+    
+    # Send a new message with the special ReplyKeyboardMarkup for phone sharing
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="**እባክዎ የስልክ ቁጥርዎን ያስገቡ:**",
+        parse_mode='Markdown',
+        reply_markup=get_phone_keyboard()
+    )
+
+    return ASK_PHONE_NUMBER
+
+async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Receives the phone number (via contact or text) and moves to message composition."""
+    phone_number = None
+
+    if update.message.contact:
+        # User used the 'Share Contact' button
+        phone_number = update.message.contact.phone_number
+    elif update.message.text:
+        # User typed the number or other text
+        phone_number = update.message.text
+
+    if phone_number:
+        # Store the phone number
+        context.user_data['phone_number'] = phone_number
+
+        # Confirm the phone number and ask for the message
+        await update.message.reply_text(
+            f"✅ **ስልክ ቁጥርዎ:** `{phone_number}` **ተመዝግቧል፡፡**\n\n"
+             "**📩 Step 2: Now, send your message**\n"
              "እባክዎ መልዕክትዎን ወይም ጥያቄዎን በአንድ ጊዜ ይላኩልን፡፡ አድሚኖች መልዕክቱን ወዲያውኑ አይተው ይመልሱልዎታል፡፡\n\n"
              "**ማስታወሻ:** ጽሑፍ ብቻ ወይም ፎቶ ከመግለጫ ጋር መላክ ይችላሉ፡፡",
-        parse_mode='Markdown',
-        reply_markup=get_cancel_message_keyboard()
-    )
-    return SEND_MESSAGE
+            parse_mode='Markdown',
+            # We hide the ReplyKeyboard and present the InlineKeyboard for cancellation
+            reply_markup=get_cancel_message_keyboard()
+        )
+        return SEND_MESSAGE
+    else:
+        # Should not happen with current filters, but as a safeguard
+        await update.message.reply_text(
+            "⚠️ እባክዎ የስልክ ቁጥርዎን በትክክል ያስገቡ፡፡",
+            reply_markup=get_phone_keyboard()
+        )
+        return ASK_PHONE_NUMBER
+
 
 async def receive_direct_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Receives the message (text or photo) and forwards it to the support chat."""
+    """Receives the message (text or photo) and forwards it to the support chat, including the phone number."""
     user = update.effective_user
+    phone_number = context.user_data.get('phone_number', 'N/A (Not Provided)')
 
     # Compile the summary header for the support team
     summary_header = (
         "🔔 **NEW DIRECT MESSAGE** 🔔\n"
         f"**From:** @{user.username or 'N/A'} (ID: `{user.id}`)\n"
+        f"**📞 Phone:** `{phone_number}`\n" # PHONE NUMBER INCLUDED HERE
         "-------------------------------------\n"
     )
-
+    
     # 1. Forward the message (photo/text) to the support chat
     try:
+        # Ensure the phone keyboard is removed from the user's view
+        reply_markup = get_back_to_start_keyboard()
+
         if update.message.text:
             await context.bot.send_message(
                 chat_id=SUPPORT_CHAT_ID,
@@ -173,14 +236,25 @@ async def receive_direct_message(update: Update, context: ContextTypes.DEFAULT_T
 
         else:
             # Should not happen with the filter, but as a safeguard
-            await update.message.reply_text("⚠️ እባክዎ ትክክለኛ የጽሑፍ መልዕክት ወይም ፎቶ ይላኩ፡፡", reply_markup=get_cancel_message_keyboard())
+            await update.message.reply_text(
+                "⚠️ እባክዎ ትክክለኛ የጽሑፍ መልዕክት ወይም ፎቶ ይላኩ፡፡", 
+                reply_markup=get_cancel_message_keyboard() # Keep the inline cancel button
+            )
             return SEND_MESSAGE
 
-        # 2. Confirm to the user and return to main menu
+        # 2. Confirm to the user and return to main menu, removing the reply keyboard
         await update.message.reply_text(
             confirmation_text,
-            reply_markup=get_back_to_start_keyboard()
+            reply_markup=ReplyKeyboardMarkup([[]], resize_keyboard=True, one_time_keyboard=True, selective=True) # Send empty reply keyboard to remove it
         )
+        # 3. Send the final main menu with the inline keyboard
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="👋 **Welcome back to the main support menu!** Please choose an option:",
+            parse_mode='Markdown',
+            reply_markup=get_start_keyboard()
+        )
+
 
     except Exception as e:
         logger.error(f"Failed to forward direct message to support chat {SUPPORT_CHAT_ID}: {e}")
@@ -194,12 +268,30 @@ async def receive_direct_message(update: Update, context: ContextTypes.DEFAULT_T
 
 async def cancel_direct_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Cancels the message composition and returns to the start menu."""
-    # Use the button handler to go back to start
-    await button_handler(update, context)
+    
+    if update.callback_query:
+        # User pressed the Inline 'Cancel Message' button
+        query = update.callback_query
+        await query.answer()
+        await query.edit_message_text(
+            text='Message composition canceled. Press /start to open the main menu.',
+            reply_markup=None # Remove the cancel button
+        )
+    else:
+        # User sent /start during the conversation (CommandHandler fallback)
+        await update.message.reply_text(
+            'Message composition canceled. Press /start to open the main menu.',
+            reply_markup=ReplyKeyboardMarkup([[]], resize_keyboard=True, one_time_keyboard=True, selective=True) # Remove the Reply Keyboard
+        )
+    
+    # Call the main start command to return to the menu
+    await start_command(update, context) 
+
+    context.user_data.clear()
     return ConversationHandler.END
 
 # --- REGISTRATION CONVERSATION HANDLERS (Unchanged in logic) ---
-#NOTE: Registration handlers are still present but only accessible if you add a 'Register' button back
+# NOTE: Registration handlers are still present but only accessible if you add a 'Register' button back
 # or if you use the direct callback data in a message (e.g., /start_reg).
 
 async def start_registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -285,9 +377,12 @@ async def cancel_registration(update: Update, context: ContextTypes.DEFAULT_TYPE
 # --- GENERAL HANDLERS (MODIFIED) ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends the NEW support-focused welcome message."""
+    """Sends the NEW support-focused welcome message, ensuring reply keyboard is removed."""
     reply_markup = get_start_keyboard()
-    # New custom welcome message
+    
+    # A custom ReplyKeyboardMarkup is created to explicitly remove any existing Reply Keyboards (like the phone one)
+    remove_keyboard = ReplyKeyboardMarkup([[]], resize_keyboard=True, one_time_keyboard=True, selective=True)
+
     welcome_text = (
       "👋 **ውድ ተማሪዎቻችን ሰላም!**\n\n"
 "መልዕክት ለመላክ፣ ለመገናኘት ወይም ስለ Family Academy ጥያቄ ለመጠየቅ ከፈለጉ፣ "
@@ -296,6 +391,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     )
 
+    # First message: Remove any lingering ReplyKeyboardMarkup
+    await update.message.reply_text(
+        "Loading menu...",
+        reply_markup=remove_keyboard
+    )
+    # Second message: Send the actual menu with the InlineKeyboardMarkup
     await update.message.reply_text(
         welcome_text,
         parse_mode='Markdown',
@@ -308,11 +409,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # Delegate to the direct message handler first
     if query.data == 'START_DIRECT_MESSAGE':
-        # Don't answer the query here, let the conversation handler entry point do it
-        # Note: We need to rely on the ConversationHandler entry point to handle this now.
-        # For simplicity and to avoid restructuring the main ConversationHandler, I'll redirect it.
-        # However, for the 'Cancel Message' button which uses 'GO_BACK_START', we handle it here.
-        pass # Let the Direct Message CH handle this.
+        # Note: The ConversationHandler entry point handles this.
         return
 
     await query.answer()
@@ -364,13 +461,20 @@ def main() -> None:
         logger.error(f"Failed to build application: {e}. Check your token again.")
         return
 
-    # 1. Direct Message Conversation Handler (NEW)
+    # 1. Direct Message Conversation Handler (MODIFIED)
     direct_message_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(start_direct_message, pattern='^START_DIRECT_MESSAGE$')],
         states={
+            # State 99: ASK_PHONE_NUMBER - Accepts Contact object or text
+            ASK_PHONE_NUMBER: [MessageHandler(filters.CONTACT | (filters.TEXT & ~filters.COMMAND), get_phone_number)],
+            # State 100: SEND_MESSAGE - Accepts text or photo
             SEND_MESSAGE: [MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, receive_direct_message)],
         },
-        fallbacks=[CallbackQueryHandler(cancel_direct_message, pattern='^GO_BACK_START$'), CommandHandler('start', cancel_direct_message)],
+        # Fallbacks to cancel the conversation
+        fallbacks=[
+            CallbackQueryHandler(cancel_direct_message, pattern='^GO_BACK_START$'), 
+            CommandHandler('start', cancel_direct_message)
+        ],
         allow_reentry=True
     )
     application.add_handler(direct_message_handler)
